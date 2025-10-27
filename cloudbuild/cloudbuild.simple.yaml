@@ -1,0 +1,203 @@
+# Visual MLOps Pipeline with Custom Component Image
+# Build custom image for Vertex AI Pipeline components + run visual pipeline
+steps:
+  # Step 1: Build custom image for pipeline components
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-component-image'
+    args: [
+      'build',
+      '-f', 'docker/Dockerfile.components',
+      '-t', '${_DOCKERHUB_USERNAME}/fraud-detection-components:${SHORT_SHA}',
+      '-t', '${_DOCKERHUB_USERNAME}/fraud-detection-components:latest',
+      '.'
+    ]
+
+  # Step 2: Build UI image
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-ui-image'
+    args: [
+      'build',
+      '-f', 'Dockerfile.app',
+      '-t', '${_DOCKERHUB_USERNAME}/fraud-ui:${SHORT_SHA}',
+      '-t', '${_DOCKERHUB_USERNAME}/fraud-ui:latest',
+      '.'
+    ]
+
+  # Step 3: Push images to Docker Hub
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'push-images'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "Pushing images to Docker Hub..."
+        
+        # Login to Docker Hub
+        echo "$$DOCKERHUB_TOKEN" | docker login --username ${_DOCKERHUB_USERNAME} --password-stdin
+        
+        # Push component images
+        docker push ${_DOCKERHUB_USERNAME}/fraud-detection-components:${SHORT_SHA}
+        docker push ${_DOCKERHUB_USERNAME}/fraud-detection-components:latest
+        
+        # Push UI images
+        docker push ${_DOCKERHUB_USERNAME}/fraud-ui:${SHORT_SHA}
+        docker push ${_DOCKERHUB_USERNAME}/fraud-ui:latest
+        
+        echo "All images pushed successfully!"
+    secretEnv: ['DOCKERHUB_TOKEN']
+    waitFor: ['build-component-image', 'build-ui-image']
+
+  # Step 4: Setup teardown infrastructure (Cloud Function + Tasks Queue)
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
+    id: 'setup-teardown'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "Setting up teardown infrastructure..."
+        
+        # Create Cloud Tasks queue if it doesn't exist
+        gcloud tasks queues describe ui-teardown-queue \
+          --location=${_REGION} \
+          --project=${_PROJECT_ID} 2>/dev/null || \
+        gcloud tasks queues create ui-teardown-queue \
+          --location=${_REGION} \
+          --project=${_PROJECT_ID}
+        
+        echo "Cloud Tasks queue ready: ui-teardown-queue"
+        
+        # Deploy Cloud Function for teardown
+        gcloud functions deploy teardown-cloud-run \
+          --gen2 \
+          --runtime=python311 \
+          --region=${_REGION} \
+          --source=./teardown_function \
+          --entry-point=teardown_cloud_run \
+          --trigger-http \
+          --allow-unauthenticated \
+          --project=${_PROJECT_ID} \
+          --quiet
+        
+        # Get the function URL
+        FUNCTION_URL=$$(gcloud functions describe teardown-cloud-run \
+          --gen2 \
+          --region=${_REGION} \
+          --project=${_PROJECT_ID} \
+          --format='value(serviceConfig.uri)')
+        
+        echo "Teardown function deployed: $$FUNCTION_URL"
+        echo "$$FUNCTION_URL" > /workspace/teardown_function_url.txt
+        
+        echo "Teardown infrastructure ready!"
+    waitFor: ['push-images']
+
+  # Step 5: Cleanup old UI instances and tasks
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
+    id: 'cleanup-old-ui'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "Cleaning up old UI instances..."
+        
+        # List and delete old fraud-ui services
+        for service in $$(gcloud run services list \
+          --platform=managed \
+          --region=${_REGION} \
+          --project=${_PROJECT_ID} \
+          --format='value(metadata.name)' \
+          --filter='metadata.name:fraud-ui-'); do
+          echo "Deleting old service: $$service"
+          gcloud run services delete $$service \
+            --platform=managed \
+            --region=${_REGION} \
+            --project=${_PROJECT_ID} \
+            --quiet || true
+        done
+        
+        # Cancel pending teardown tasks
+        for task in $$(gcloud tasks list \
+          --queue=ui-teardown-queue \
+          --location=${_REGION} \
+          --project=${_PROJECT_ID} \
+          --format='value(name)' 2>/dev/null || echo ""); do
+          if [ ! -z "$$task" ]; then
+            echo "Deleting pending task: $$task"
+            gcloud tasks delete $$task --quiet || true
+          fi
+        done
+        
+        echo "Cleanup complete!"
+    waitFor: ['setup-teardown']
+
+  # Step 6: Create and run visual pipeline in Vertex AI
+  - name: 'python:3.9-slim'
+    id: 'visual-pipeline'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        # Install dependencies
+        pip install -r requirements.txt
+        
+        # Read teardown function URL
+        TEARDOWN_URL=$$(cat /workspace/teardown_function_url.txt)
+        
+        # Set environment variables
+        export PROJECT_ID=${_PROJECT_ID}
+        export REGION=${_REGION}
+        export SHORT_SHA=${SHORT_SHA}
+        export DOCKERHUB_USERNAME=${_DOCKERHUB_USERNAME}
+        export SERVICE_ACCOUNT="github-actions@${_PROJECT_ID}.iam.gserviceaccount.com"
+        export TEARDOWN_FUNCTION_URL=$$TEARDOWN_URL
+        export TASKS_QUEUE="ui-teardown-queue"
+        
+        # Compile and run visual pipeline with custom component image
+        echo "Creating and running visual pipeline in Vertex AI..."
+        echo "Teardown URL: $$TEARDOWN_URL"
+        python compile_and_run_pipeline.py
+    waitFor: ['cleanup-old-ui']
+
+  # Step 7: Generate summary
+  - name: 'python:3.9-slim'
+    id: 'pipeline-summary'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        # Set environment variables
+        export PROJECT_ID=${_PROJECT_ID}
+        export SHORT_SHA=${SHORT_SHA}
+        export DOCKERHUB_USERNAME=${_DOCKERHUB_USERNAME}
+        
+        # Run summary script
+        python pipeline_summary.py
+        
+        echo ""
+        echo "Visual Pipeline Status:"
+        echo "  Pipeline submitted to Vertex AI"
+        echo "  View visual flow: https://console.cloud.google.com/vertex-ai/pipelines?project=${_PROJECT_ID}"
+        echo "   All training, evaluation, and registration happens in the visual pipeline!"
+    waitFor: ['visual-pipeline']
+
+# Substitutions
+substitutions:
+  _PROJECT_ID: 'data-engineering-jads-2025'
+  _REGION: 'us-central1'
+  _DOCKERHUB_USERNAME: 'uvtmartijn'
+
+# Secret for Docker Hub token
+availableSecrets:
+  secretManager:
+  - versionName: projects/${_PROJECT_ID}/secrets/dockerhub-token/versions/latest
+    env: 'DOCKERHUB_TOKEN'
+
+# Service account
+serviceAccount: 'projects/data-engineering-jads-2025/serviceAccounts/github-actions@data-engineering-jads-2025.iam.gserviceaccount.com'
+
+# Options
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+# Timeout
+timeout: '1800s'  # 30 minutes

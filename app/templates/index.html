@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fraud Model Predict</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="container">
+    <h1>Fraud Detection - Batch Predict</h1>
+    <form id="uploadForm">
+      <label for="project_id">GCP Project ID</label>
+      <input id="project_id" name="project_id" placeholder="data-engineering-jads-2025" value="data-engineering-jads-2025">
+
+      <label for="model_gcs">Model GCS path (optional - uses deployed model if empty)</label>
+      <input id="model_gcs" name="model_gcs" placeholder="gs://my-bucket/fraud-model-latest/model.pkl">
+
+      <label for="file">Upload CSV</label>
+      <input type="file" id="file" name="file" accept=".csv" />
+
+      <button type="submit" class="btn">Upload & Predict</button>
+    </form>
+
+    <div id="results"></div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
