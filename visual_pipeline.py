@@ -95,7 +95,7 @@ def train_xgboost_model(
     
     # Train model
     model = xgb.XGBClassifier(
-        max_depth=6,
+        max_depth=5,
         learning_rate=0.1,
         n_estimators=100,
         subsample=0.8,
