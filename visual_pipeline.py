@@ -13,7 +13,7 @@ def load_creditcard_data(
     project_id: str,
     dataset_output: Output[Dataset]
 ):
-    """Load creditcard dataset from GCS"""
+    """Load creditcard dataset from GCS, live demo update"""
     import pandas as pd
     from google.cloud import storage
     
